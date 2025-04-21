@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import glob
 import traceback
+import tiktoken
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,6 +15,17 @@ st.set_page_config(
     page_icon="🏨",
     layout="wide"
 )
+
+def num_tokens_from_string(string, model="gpt-3.5-turbo"):
+    """Returns the number of tokens in a text string."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+        num_tokens = len(encoding.encode(string))
+        return num_tokens
+    except Exception as e:
+        st.session_state.logs.append(f"Error calculating tokens: {str(e)}")
+        # Fallback approximation: 1 token ~= 4 chars for English text
+        return len(string) // 4
 
 def load_hotel_data():
     """Load all the hotel data from text files in the data directory."""
@@ -60,6 +72,76 @@ def initialize_openai_client():
         st.session_state.logs.append(f"ERROR: {str(e)}")
         return None
 
+def extract_relevant_chunks(question, hotel_data, max_tokens=8000):
+    """Extract the most relevant chunks of hotel data based on the question."""
+    # Lower token count for system message, question, and formatting
+    system_tokens = 500
+    question_tokens = num_tokens_from_string(question)
+    available_tokens = max_tokens - system_tokens - question_tokens - 500  # 500 for buffer
+    
+    st.session_state.logs.append(f"Available tokens for data: {available_tokens}")
+    
+    # Keywords from the question to help identify relevant sections
+    keywords = [word.lower() for word in question.split() if len(word) > 3]
+    
+    # Simple relevance scoring for each category
+    relevant_data = {}
+    
+    # Check if any hotel name is mentioned specifically
+    hotel_names = ["The Crown Hotel", "Plaza Hotel", "Fortune Hotel", "The Stuart Hotel", 
+                   "The Milestone Hotel", "Bluewaters Hotel", "Pinewood Hotel"]
+    
+    mentioned_hotels = [hotel for hotel in hotel_names if hotel.lower() in question.lower()]
+    
+    for category, content in hotel_data.items():
+        # Split into paragraphs
+        paragraphs = content.split('\n\n')
+        relevant_paragraphs = []
+        
+        # If specific hotels are mentioned, prioritize those sections
+        if mentioned_hotels:
+            for hotel in mentioned_hotels:
+                hotel_paragraphs = [p for p in paragraphs if hotel.lower() in p.lower()]
+                relevant_paragraphs.extend(hotel_paragraphs)
+        
+        # Add paragraphs with keywords
+        for paragraph in paragraphs:
+            if any(keyword in paragraph.lower() for keyword in keywords):
+                if paragraph not in relevant_paragraphs:
+                    relevant_paragraphs.append(paragraph)
+        
+        # If we don't have enough relevant paragraphs, add some general ones
+        if len(relevant_paragraphs) < 3 and len(paragraphs) > 3:
+            # Add introductory paragraphs which often contain general info
+            for p in paragraphs[:3]:
+                if p not in relevant_paragraphs:
+                    relevant_paragraphs.append(p)
+        
+        # Join relevant paragraphs
+        relevant_content = '\n\n'.join(relevant_paragraphs)
+        
+        # Track token counts
+        tokens = num_tokens_from_string(relevant_content)
+        st.session_state.logs.append(f"{category} relevant content: {tokens} tokens")
+        
+        relevant_data[category] = relevant_content
+    
+    # Calculate total tokens
+    total_tokens = sum(num_tokens_from_string(content) for content in relevant_data.values())
+    
+    # If we still exceed the token limit, trim the data proportionally
+    if total_tokens > available_tokens:
+        reduction_factor = available_tokens / total_tokens
+        for category in relevant_data:
+            # Simple approach: take the first X% of each content
+            content = relevant_data[category]
+            reduced_length = int(len(content) * reduction_factor)
+            relevant_data[category] = content[:reduced_length]
+            
+        st.session_state.logs.append(f"Reduced data to fit token limit. Reduction factor: {reduction_factor:.2f}")
+    
+    return relevant_data
+
 def ask_question(client, question, hotel_data):
     """Send a question to the OpenAI API and get a response."""
     try:
@@ -67,6 +149,9 @@ def ask_question(client, question, hotel_data):
             return "Error: OpenAI client not initialized"
             
         st.session_state.logs.append(f"Received question: {question}")
+        
+        # Extract relevant chunks of data to stay within token limits
+        relevant_data = extract_relevant_chunks(question, hotel_data)
         
         # Create system message with all available data
         system_message = """You are an AI assistant for AG Hotels. Your job is to provide detailed, helpful information based on the hotel data provided to you.
@@ -86,19 +171,51 @@ Be thorough in searching the data for relevant information."""
             {"role": "system", "content": system_message},
             {"role": "user", "content": f"""Customer question: {question}
 
-Here is the complete data to search through:
+Here is the relevant data to search through:
 
 === LOCATION DATA ===
-{hotel_data.get('location', '')}
+{relevant_data.get('location', '')}
 
 === WEDDINGS DATA ===
-{hotel_data.get('weddings', '')}
+{relevant_data.get('weddings', '')}
 
 === HOTEL_DATA ===
-{hotel_data.get('hotel_data', '')}
+{relevant_data.get('hotel_data', '')}
 
 Please provide a helpful, detailed answer based on the above information."""}
         ]
+        
+        # Estimate total tokens
+        total_tokens = (
+            num_tokens_from_string(system_message) +
+            num_tokens_from_string(question) +
+            sum(num_tokens_from_string(content) for content in relevant_data.values()) +
+            100  # buffer for formatting
+        )
+        
+        st.session_state.logs.append(f"Estimated total tokens: {total_tokens}")
+        
+        # Check if we're still over the limit
+        if total_tokens > 15000:  # safe limit for gpt-3.5-turbo
+            st.session_state.logs.append("WARNING: Still over token limit, reducing content further")
+            for category in relevant_data:
+                relevant_data[category] = relevant_data[category][:len(relevant_data[category])//2]
+            
+            # Update the message with reduced content
+            messages[1]["content"] = f"""Customer question: {question}
+
+Here is the relevant data to search through (reduced due to token limits):
+
+=== LOCATION DATA ===
+{relevant_data.get('location', '')}
+
+=== WEDDINGS DATA ===
+{relevant_data.get('weddings', '')}
+
+=== HOTEL_DATA ===
+{relevant_data.get('hotel_data', '')}
+
+Please provide a helpful, detailed answer based on the above information."""
         
         st.session_state.logs.append("Sending request to OpenAI...")
         
