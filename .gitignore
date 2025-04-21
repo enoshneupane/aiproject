@@ -17,6 +17,51 @@
 .env.test.local
 .env.production.local
 
+# Environment variables
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+logs/
+*.log
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log* 
+yarn-error.log*
+
+# OS specific
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor directories and files
+.idea
+.vscode
+*.swp
+*.swo
+
+# Streamlit specific
+.streamlit/secrets.toml 
